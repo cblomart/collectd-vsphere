@@ -4,6 +4,7 @@ from pyVmomi import vim, vmodl
 import requests
 from threading import Thread
 from datetime import timedelta, datetime
+import ssl
 
 VERBOSE_LOGGING = False
 INTERVAL = 60
@@ -16,6 +17,8 @@ METRICS={}
 METRICS_BY_ID={}
 
 requests.packages.urllib3.disable_warnings()
+context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
+context.verify_mode = ssl.CERT_NONE
 
 def config(conf):
   global VCENTERS_INFO,VERBOSE_LOGGING,METRICS_INFO,INTERVAL,CONSOLIDATE,DOMAIN
@@ -36,7 +39,7 @@ def config(conf):
       DOMAIN = val 
     elif key == 'consolidate':
       for tmp in val.split(','):
-        if tmp in ['min', 'avg', 'max', 'sum', 'lat']:
+        if tmp in ['min', 'avg', 'max']:
           CONSOLIDATE.append(tmp)
     elif key == 'vsphere':
       VCENTERS_INFO[val]={}
@@ -53,11 +56,16 @@ def config(conf):
         subval = None
         if len(subnode.values) > 0:
           subval = subnode.values[0]
+        instances = False
+        if len(subnode.values) > 1:
+          if subnode.values[1]=="True":
+            instances = True
+        valgroup = [ subval, instances ]
         if subkey=='metric':
-          verbose("config %s.%s=%s" % (key,subkey,subval))
+          verbose("config %s.%s=%s(%s)" % (key,subkey,subval,instances))
           if key not in METRICS_INFO.keys():
             METRICS_INFO[key]=[]
-          METRICS_INFO[key].append(subval)
+          METRICS_INFO[key].append(valgroup)
   #remove invalid vcenters
   invalids = []
   for vcenter in VCENTERS_INFO.keys():
@@ -78,7 +86,7 @@ def config(conf):
   #show metrics
   if VERBOSE_LOGGING:
     for vitype in METRICS_INFO.keys():
-        verbose("metrics: %s=%s" % (vitype, METRICS_INFO[vitype]))
+        verbose("metrics: %s=%s(%s)" % (vitype, METRICS_INFO[vitype][0],  METRICS_INFO[vitype][1]))
   verbose("register read function")
   collectd.register_read(read,INTERVAL)
 
@@ -90,9 +98,9 @@ def init():
   verbose("Identifying required metrics")
   allmetrics = []
   for vitype in METRICS_INFO.keys():
-    for metric in METRICS_INFO[vitype]:
-      if metric not in allmetrics:
-        allmetrics.append(metric)
+    for metricdef in METRICS_INFO[vitype]:
+      if metricdef[0] not in allmetrics:
+        allmetrics.append(metricdef[0])
   verbose("Required metrics: %s" % allmetrics)
   verbose("Connecting to vcenters")
   for vcenter in VCENTERS_INFO.keys():
@@ -104,9 +112,12 @@ def init():
     vc = {}
     si = None
     try:
-      si = SmartConnect(host=hostname,user=username,pwd=password)
+      si = SmartConnect(host=hostname,user=username,pwd=password,sslContext=context)
     except IOError, e:
-      collectd.warning("vsphere plugin: could not connect to vcenter %s with fault '%s'" % (vcenter,e.msg))
+      if hasattr(e, 'msg'):
+        collectd.warning("vsphere plugin: could not connect to vcenter %s with fault '%s'" % (vcenter,e.msg))
+      if hasattr(e, 'message'):
+        collectd.warning("vsphere plugin: could not connect to vcenter %s with fault '%s'" % (vcenter,e.message))
       pass
     if not si:
       collectd.warning("vsphere plugin: could not connect to vcenter %s" % vcenter)
@@ -128,11 +139,14 @@ def init():
       METRICS[vcenter] = {}
     for vitype in METRICS_INFO.keys():
       METRICS[vcenter][vitype]=[]
-      for metric in METRICS_INFO[vitype]:
-        if metric in perf_dict:
-          METRICS[vcenter][vitype].append(perf_dict[metric])
+      for metricdef in METRICS_INFO[vitype]:
+        if metricdef[0] in perf_dict:
+          if metricdef[1]:
+            METRICS[vcenter][vitype].append([perf_dict[metricdef[0]],"*"])
+          else:
+            METRICS[vcenter][vitype].append([perf_dict[metricdef[0]],""])
         else:
-          collectd.warning("vsphere plugin: Requested metric %s for %s in %s not found." % (metric, vitype, vcenter))
+          collectd.warning("vsphere plugin: Requested metric %s for %s in %s not found." % (metricdef[0], vitype, vcenter))
       verbose("metrics ids for %s in %s: %s" % (vitype,vcenter,METRICS[vcenter][vitype]))
 
 def read(data=None):
@@ -178,8 +192,8 @@ def getstats(vcenter,vitype,metrics):
   end_time = si.CurrentTime() - timedelta(seconds=1)
   start_time = end_time - timedelta(seconds=INTERVAL)
   metricids = []
-  for metric in metrics:
-    metricid = vim.PerformanceManager.MetricId(counterId = metric, instance = "")
+  for metricdef in metrics:
+    metricid = vim.PerformanceManager.MetricId(counterId = metricdef[0], instance = metricdef[1])
     metricids.append(metricid)
   viclass = None
   if vitype=="virtualmachine":
@@ -215,7 +229,7 @@ def getstats(vcenter,vitype,metrics):
 
 def getstat(perfmanager,query,name,vcenter,vitype):
   global METRICS_BY_ID, CONSOLIDATE, INTERVAL
-  perfresults = []
+  perfresults = None
   try:
     perfresults = perfmanager.QueryPerf(querySpec=[query])
   except:
@@ -231,6 +245,8 @@ def getstat(perfmanager,query,name,vcenter,vitype):
       metric = METRICS_BY_ID[vcenter["name"]][perf.id.counterId].replace("\.[a-z]+$","")
       metric = '.'.join(metric.split('.')[:2])
       instance = perf.id.instance
+      if metric.startswith('disk') and instance.startswith('naa.'):
+        instance = instance[4:]
       values = perf.value
       if values is None or len(values) == 0:
         collectd.warning("vsphere plugin: no values returned for %s of %s %s in %s." % (metric, vitype, name, vcenter['name']))
