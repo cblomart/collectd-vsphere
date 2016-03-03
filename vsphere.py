@@ -233,7 +233,7 @@ def getstat(perfmanager,query,name,vcenter,vitype):
   try:
     perfresults = perfmanager.QueryPerf(querySpec=[query])
   except:
-    collectd.warning("vspere plugin: connection to vcenter %s issue", % (vcenter["name"]))
+    collectd.warning("vsphere plugin: connection to vcenter %s issue" % (vcenter["name"]))
     init()
     return
   if perfresults is None:
