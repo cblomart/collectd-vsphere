@@ -35,6 +35,7 @@ Domain string to remove from object names (avoids long stats name), empty by def
   - Metric:
   
   The metrics to collect in the form group.name.rollup (i.e.: mem.vmmemctl.average)
+
   The second argument is a boolean (default to false) indicating to get metric at instance level
   
 ### vCenter(s)
